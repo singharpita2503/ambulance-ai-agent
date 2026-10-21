@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  AlertTriangle,
   Ambulance,
+  CheckCircle2,
+  LocateFixed,
   Pause,
   Play,
   RotateCcw,
   Route as RouteIcon,
   Siren,
+  X,
 } from "lucide-react";
 import { AmbuAssist } from "./AmbuAssist";
 import type { AmbuAssistContext } from "./assistantLogic";
@@ -24,6 +28,7 @@ import { MapView } from "./MapView";
 import type {
   AlgorithmName,
   CompareResponse,
+  DeviceLocation,
   GraphMode,
   MapInfo,
   ObjectiveName,
@@ -35,9 +40,23 @@ import type {
   Snap,
 } from "./types";
 
+const NAGPUR_CENTER = { lat: 21.1458, lon: 79.0882 };
+const NAGPUR_CITY_RADIUS_M = 12000;
+const MAX_MAP_RADIUS_M = 15000;
+
 function fmt(n: number | null | undefined, digits = 1, unit = "") {
   if (n === null || n === undefined || Number.isNaN(n) || !Number.isFinite(n)) return "—";
   return `${n.toFixed(digits)}${unit ? " " + unit : ""}`;
+}
+
+function distanceMeters(a: { lat: number; lon: number }, b: { lat: number; lon: number }) {
+  const radians = (degrees: number) => (degrees * Math.PI) / 180;
+  const lat1 = radians(a.lat);
+  const lat2 = radians(b.lat);
+  const dLat = lat2 - lat1;
+  const dLon = radians(b.lon - a.lon);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 6_371_000 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
 }
 
 function formatSimEvent(e: Record<string, unknown>): string {
@@ -73,6 +92,15 @@ function fmtTime(s: number | null | undefined) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type NotificationLevel = "safe" | "warning" | "danger";
+
+interface RouteNotification {
+  id: number;
+  level: NotificationLevel;
+  title: string;
+  message: string;
 }
 
 function BaselineResults({ experiment }: { experiment: Record<string, unknown> }) {
@@ -143,6 +171,7 @@ export default function App() {
   const [explanations, setExplanations] = useState<Record<string, string>>({});
   const [error, setError] = useState<string>("");
   const [notice, setNotice] = useState<string>("");
+  const [notification, setNotification] = useState<RouteNotification | null>(null);
   const [busy, setBusy] = useState(false);
 
   const [graphMode, setGraphMode] = useState<GraphMode>("nagpur");
@@ -151,11 +180,14 @@ export default function App() {
   const [replanEnabled, setReplanEnabled] = useState(true);
   const [autoBlockAfter, setAutoBlockAfter] = useState<number>(2);
   const [useAutoBlock, setUseAutoBlock] = useState(false);
-  const [distM, setDistM] = useState(2200);
+  const [distM, setDistM] = useState(NAGPUR_CITY_RADIUS_M);
   const [congestionMult, setCongestionMult] = useState(3);
   const [pickMode, setPickMode] = useState<PickMode>("start");
   const [start, setStart] = useState<Snap | null>(null);
   const [goal, setGoal] = useState<Snap | null>(null);
+  const [deviceLocation, setDeviceLocation] = useState<DeviceLocation | null>(null);
+  const [locationFocus, setLocationFocus] = useState<[number, number] | null>(null);
+  const [locationStatus, setLocationStatus] = useState("Waiting for device location permission…");
   const [route, setRoute] = useState<RouteResult | null>(null);
   const [compare, setCompare] = useState<CompareResponse | null>(null);
   const [sim, setSim] = useState<SimulationSnapshot | null>(null);
@@ -171,7 +203,29 @@ export default function App() {
   const playingRef = useRef(false);
   const simIdRef = useRef<string | null>(null);
   const geomQueueRef = useRef<[number, number][]>([]);
+  const notificationTimerRef = useRef<number | null>(null);
+  const seenSimulationEventsRef = useRef<{ id: string | null; count: number }>({ id: null, count: 0 });
+  const autoLocationFocusRef = useRef(false);
+  const autoLocationSnapRef = useRef(false);
+  const manualEndpointChoiceRef = useRef(false);
   const [ambulancePos, setAmbulancePos] = useState<[number, number] | null>(null);
+
+  function showNotification(level: NotificationLevel, title: string, message: string) {
+    if (notificationTimerRef.current !== null) window.clearTimeout(notificationTimerRef.current);
+    setNotification({ id: Date.now(), level, title, message });
+    notificationTimerRef.current = window.setTimeout(() => {
+      setNotification(null);
+      notificationTimerRef.current = null;
+    }, 7000);
+  }
+
+  function dismissNotification() {
+    if (notificationTimerRef.current !== null) {
+      window.clearTimeout(notificationTimerRef.current);
+      notificationTimerRef.current = null;
+    }
+    setNotification(null);
+  }
 
   const nodeLookup = useMemo(() => {
     const map: Record<string, { lat: number; lon: number }> = {};
@@ -207,11 +261,178 @@ export default function App() {
     }
   }, []);
 
+  function formatGeolocationError(error: GeolocationPositionError): string {
+    if (error.code === error.PERMISSION_DENIED) return "Location permission was denied. Allow location access in your browser, or choose the start on the map.";
+    if (error.code === error.POSITION_UNAVAILABLE) return "Your device could not determine its location. You can still choose a start on the map.";
+    if (error.code === error.TIMEOUT) return "Timed out while getting your location. Try again or choose a start on the map.";
+    return "Could not get device location. You can still choose a start on the map.";
+  }
+
+  function readDeviceLocation(): Promise<DeviceLocation> {
+    if (!navigator.geolocation) {
+      return Promise.reject(new Error("This browser does not support device location. Choose a start on the map instead."));
+    }
+    return new Promise((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(
+        ({ coords }) => resolve({
+          lat: coords.latitude,
+          lon: coords.longitude,
+          accuracy_m: coords.accuracy,
+        }),
+        (error) => reject(new Error(formatGeolocationError(error))),
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 },
+      );
+    });
+  }
+
+  function invalidateTripForEndpointChange() {
+    setPlaying(false);
+    setPlayMode(null);
+    setSim(null);
+    setAmbulancePos(null);
+    geomQueueRef.current = [];
+    simIdRef.current = null;
+    setRoute(null);
+    setCompare(null);
+    setSearchEvents([]);
+    setSearchIndex(0);
+  }
+
+  async function applyDeviceLocationAsStart(location: DeviceLocation, automatic = false) {
+    if (graphMode !== "nagpur") {
+      setLocationStatus("Device GPS is shown on the map; choose a start on the teaching graph manually.");
+      return;
+    }
+    try {
+      const mapReady = await ensureNagpurMapForLocation(location);
+      if (!mapReady || (automatic && manualEndpointChoiceRef.current)) return;
+      const snapped = await api.snap({ lat: location.lat, lon: location.lon, graph_mode: "nagpur" });
+      if (automatic && manualEndpointChoiceRef.current) return;
+      if (snapped.snap_distance_m > 1200) {
+        setLocationStatus("Device GPS is outside the loaded Nagpur road network. Choose a start inside the mapped area.");
+        return;
+      }
+      manualEndpointChoiceRef.current = true;
+      invalidateTripForEndpointChange();
+      setStart(snapped);
+      setPickMode("goal");
+      setLocationStatus(`Start set from device GPS (snapped ${Math.round(snapped.snap_distance_m)} m to a road).`);
+      setNotice("Device location set as the trip start. Select the destination on the map.");
+    } catch (e) {
+      setLocationStatus(`GPS is marked, but could not snap it to a road: ${String(e)}`);
+    }
+  }
+
+  async function ensureNagpurMapForLocation(location: DeviceLocation): Promise<boolean> {
+    const metadata = info?.nagpur?.meta;
+    const radius = typeof metadata?.dist_m === "number" ? metadata.dist_m : 0;
+    const bbox = metadata?.bbox;
+    const containsLocation = isRecord(bbox)
+      && typeof bbox.north === "number"
+      && typeof bbox.south === "number"
+      && typeof bbox.east === "number"
+      && typeof bbox.west === "number"
+      && location.lat <= bbox.north
+      && location.lat >= bbox.south
+      && location.lon <= bbox.east
+      && location.lon >= bbox.west;
+    const gpsDistanceFromCenter = distanceMeters(location, NAGPUR_CENTER);
+    const requiredRadius = Math.max(NAGPUR_CITY_RADIUS_M, gpsDistanceFromCenter + 1200);
+    if (requiredRadius > MAX_MAP_RADIUS_M) {
+      setLocationStatus("Your device is outside the supported Nagpur road-network area. This planner can route to hospitals within Nagpur, not from another city.");
+      return false;
+    }
+    const requestedRadius = Math.max(requiredRadius, Math.min(distM, MAX_MAP_RADIUS_M));
+    if (radius >= requestedRadius && containsLocation) return true;
+
+    setLocationStatus("Loading the city-wide Nagpur road network from OpenStreetMap. This may take a few minutes the first time…");
+    setBusy(true);
+    try {
+      const res = await api.loadMap({
+        dist_m: requestedRadius,
+        lat: NAGPUR_CENTER.lat,
+        lon: NAGPUR_CENTER.lon,
+      });
+      setDistM(requestedRadius);
+      setInfo({
+        ...(info as MapInfo),
+        ...res,
+        loaded: true,
+        roads: res.roads,
+        samples: res.samples,
+        nagpur: res.stats
+          ? { name: "nagpur-osm", node_count: res.stats.node_count, edge_count: res.stats.edge_count, meta: res.stats.meta || {} }
+          : info?.nagpur,
+        status: res.status,
+      } as MapInfo);
+      setGraphMode("nagpur");
+      setNotice(res.status?.message || `Loaded ${res.stats?.node_count} road intersections across Nagpur.`);
+      return true;
+    } catch (e) {
+      setLocationStatus(`Could not load the city-wide map: ${String(e)}. Check your internet connection and try again.`);
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function useDeviceLocationAsStart() {
+    manualEndpointChoiceRef.current = true;
+    setLocationStatus("Getting current device location…");
+    try {
+      const location = await readDeviceLocation();
+      setDeviceLocation(location);
+      setLocationFocus([location.lat, location.lon]);
+      autoLocationFocusRef.current = true;
+      await applyDeviceLocationAsStart(location);
+    } catch (e) {
+      setLocationStatus(String(e));
+    }
+  }
+
   useEffect(() => {
     refreshInfo().catch((e) => setError(String(e)));
     api.explanations().then(setExplanations).catch(() => undefined);
     api.scenarios().then((s) => setScenarios(s.scenarios)).catch(() => undefined);
   }, [refreshInfo]);
+
+  useEffect(() => {
+    if (!navigator.geolocation) {
+      setLocationStatus("Device location is not supported by this browser. Choose a start on the map.");
+      return;
+    }
+    const watchId = navigator.geolocation.watchPosition(
+      ({ coords }) => {
+        const location = {
+          lat: coords.latitude,
+          lon: coords.longitude,
+          accuracy_m: coords.accuracy,
+        };
+        setDeviceLocation(location);
+        setLocationStatus(`Device GPS active (±${Math.round(coords.accuracy)} m).`);
+        if (!autoLocationFocusRef.current) {
+          autoLocationFocusRef.current = true;
+          setLocationFocus([coords.latitude, coords.longitude]);
+        }
+      },
+      (error) => setLocationStatus(formatGeolocationError(error)),
+      { enableHighAccuracy: true, timeout: 15000, maximumAge: 30000 },
+    );
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, []);
+
+  useEffect(() => {
+    if (
+      !deviceLocation
+      || graphMode !== "nagpur"
+      || start
+      || sim
+      || manualEndpointChoiceRef.current
+      || autoLocationSnapRef.current
+    ) return;
+    autoLocationSnapRef.current = true;
+    void applyDeviceLocationAsStart(deviceLocation, true);
+  }, [deviceLocation, graphMode, start, sim]);
 
   useEffect(() => {
     playingRef.current = playing;
@@ -264,6 +485,54 @@ export default function App() {
     return () => window.clearInterval(t);
   }, [playing, playMode, speedMs]);
 
+  useEffect(() => {
+    if (!sim) {
+      seenSimulationEventsRef.current = { id: null, count: 0 };
+      return;
+    }
+    if (seenSimulationEventsRef.current.id !== sim.id) {
+      seenSimulationEventsRef.current = { id: sim.id, count: sim.events.length };
+      return;
+    }
+
+    const previousCount = seenSimulationEventsRef.current.count;
+    seenSimulationEventsRef.current.count = sim.events.length;
+    const roadEvents = sim.events.slice(previousCount).filter((event) => event.type === "road_event");
+    const newRoadEvent = roadEvents[roadEvents.length - 1];
+    if (!newRoadEvent) return;
+
+    const eventType = String(newRoadEvent.event_type || "");
+    const affected = Boolean(newRoadEvent.affected_remaining_route);
+    const rerouted = affected && sim.replan_count > 0 && sim.status === "running";
+    if (eventType === "block") {
+      if (sim.status === "failed" || sim.status === "stopped") {
+        showNotification("danger", "Blocked road alert", sim.status === "stopped"
+          ? "The road ahead is blocked. The ambulance stopped because re-planning is unavailable."
+          : "The road is blocked and no alternative route was found.");
+      } else {
+        showNotification("warning", "Blocked road alert", affected
+          ? rerouted
+            ? "The selected route was affected. A new route has been calculated from the ambulance's current junction."
+            : "The selected route was affected. Re-planning is not enabled."
+          : "The road is blocked, but it does not affect the current route.");
+      }
+    } else if (eventType === "congestion") {
+      const multiplier = Number(newRoadEvent.congestion);
+      const detail = Number.isFinite(multiplier) ? ` Simulated congestion: ×${multiplier}.` : "";
+      showNotification("warning", "Congestion alert", `${affected && rerouted
+        ? "The route was affected and has been recalculated."
+        : affected
+          ? "The route was affected."
+          : "The congestion is not on the current route."}${detail} This is not live traffic data.`);
+    } else if (eventType === "unblock") {
+      showNotification("safe", "Road reopened", "The selected road is no longer blocked.");
+    }
+  }, [sim]);
+
+  useEffect(() => () => {
+    if (notificationTimerRef.current !== null) window.clearTimeout(notificationTimerRef.current);
+  }, []);
+
   const samples: SampleWaypoint[] = graphMode === "toy" ? info?.toy_samples || [] : info?.samples || [];
   const roads = graphMode === "nagpur" ? info?.roads : info?.toy_roads;
   const center: [number, number] = graphMode === "toy"
@@ -274,14 +543,22 @@ export default function App() {
     setBusy(true);
     setError("");
     try {
-      const res = await api.loadMap({ dist_m: distM, force_download: force, use_cache_only: cacheOnly });
+      const res = await api.loadMap({
+        dist_m: distM,
+        lat: NAGPUR_CENTER.lat,
+        lon: NAGPUR_CENTER.lon,
+        force_download: force,
+        use_cache_only: cacheOnly,
+      });
       setInfo({
         ...(info as MapInfo),
         ...res,
         loaded: true,
         roads: res.roads,
         samples: res.samples,
-        nagpur: res.stats ? { name: "nagpur-osm", node_count: res.stats.node_count, edge_count: res.stats.edge_count, meta: {} } : info?.nagpur,
+        nagpur: res.stats
+          ? { name: "nagpur-osm", node_count: res.stats.node_count, edge_count: res.stats.edge_count, meta: res.stats.meta || {} }
+          : info?.nagpur,
         status: res.status,
       } as MapInfo);
       setNotice(res.status?.message || `Loaded ${res.stats?.node_count} nodes.`);
@@ -311,13 +588,21 @@ export default function App() {
       const body = { ...endpoints(), include_events: true, max_events: 2500 };
       const res = await api.calculate(body);
       setRoute(res);
+      setCompare(null);
       setSearchEvents(res.events || []);
       setSearchIndex(0);
       setSim(null);
       if (res.start_snap) setStart(res.start_snap);
       if (res.goal_snap) setGoal(res.goal_snap);
       if (!res.found) setError(res.error_hint || "No route found.");
-      else setNotice(`${res.algorithm} found a route. Cost ${fmt(res.cost, 2)} ${res.cost_unit}.`);
+      else {
+        setNotice(`${res.algorithm} found a route. Cost ${fmt(res.cost, 2)} ${res.cost_unit}.`);
+        showNotification(
+          "safe",
+          "Clear route found",
+          `Estimated distance: ${fmt(res.distance_m, 1, "m")}. Estimated travel time: ${fmtTime(res.time_s)}. Congestion and road safety are not monitored live.`,
+        );
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -351,19 +636,33 @@ export default function App() {
         include_events: true,
       });
       setSim(res);
+      setCompare(null);
       simIdRef.current = res.id;
       geomQueueRef.current = [];
       if (res.current) setAmbulancePos([res.current.lat, res.current.lon]);
-      setRoute(res.last_search);
+      setRoute(res.last_search ? {
+        ...res.last_search,
+        distance_m: res.remaining_distance_m ?? res.last_search.distance_m ?? null,
+        time_s: res.remaining_time_s ?? res.last_search.time_s ?? null,
+        objective: res.last_search.objective || res.objective,
+      } : null);
       setSearchEvents(res.last_search?.events || []);
       setSearchIndex(Math.max(0, (res.last_search?.events?.length || 1) - 1));
       if (res.start_snap) setStart(res.start_snap);
       if (res.goal_snap) setGoal(res.goal_snap);
-      if (res.status === "failed") setError("Initial search found no route.");
+      if (res.status === "failed") {
+        setError("Initial search found no route.");
+        showNotification("danger", "No route available", "The planner could not find a route to the selected destination.");
+      }
       else {
         setPlayMode("drive");
         setPlaying(true);
         setNotice("Simulation running along the computed road geometry.");
+        showNotification(
+          "safe",
+          "Clear route found",
+          `Estimated remaining distance: ${fmt(res.remaining_distance_m, 1, "m")}. Estimated remaining time: ${fmtTime(res.remaining_time_s)}. Congestion is simulated, not live.`,
+        );
       }
     } catch (e) {
       setError(String(e));
@@ -382,18 +681,23 @@ export default function App() {
     setCompare(null);
     setSearchEvents([]);
     setSearchIndex(0);
+    dismissNotification();
     simIdRef.current = null;
     setNotice("Reset. Road overlays from a previous simulation are cleared; the OSM graph is unchanged.");
   }
 
   async function onMapClick(lat: number, lon: number) {
+    if (pickMode !== "start" && pickMode !== "goal") return;
+    if (pickMode === "start") manualEndpointChoiceRef.current = true;
     try {
       const snapped = await api.snap({ lat, lon, graph_mode: graphMode });
       if (pickMode === "start") {
+        invalidateTripForEndpointChange();
         setStart(snapped);
         setPickMode("goal");
         setNotice(`Start snapped to node ${snapped.node_id} (${snapped.snap_distance_m} m from click). Click the map to set the destination.`);
       } else if (pickMode === "goal") {
+        invalidateTripForEndpointChange();
         setGoal(snapped);
         setPickMode("idle");
         setNotice(`Goal snapped to node ${snapped.node_id} (${snapped.snap_distance_m} m from click).`);
@@ -541,8 +845,8 @@ export default function App() {
             <button className="btn ghost" disabled={busy} onClick={() => loadMap(true, false)}>Force re-download</button>
           </div>
           <div className="field">
-            <label>Study radius (m) around Nagpur centre — first download needs internet</label>
-            <input type="number" min={800} max={8000} value={distM} onChange={(e) => setDistM(Number(e.target.value))} />
+            <label>City-wide road coverage radius (m) around Nagpur — first download needs internet</label>
+            <input type="number" min={800} max={MAX_MAP_RADIUS_M} value={distM} onChange={(e) => setDistM(Number(e.target.value))} />
           </div>
 
           <div className="field">
@@ -552,6 +856,8 @@ export default function App() {
               onChange={(e) => {
                 const s = samples.find((x) => x.id === e.target.value);
                 if (!s) return;
+                if (s.kind !== "hospital") manualEndpointChoiceRef.current = true;
+                invalidateTripForEndpointChange();
                 if (s.kind === "hospital") setGoal(s.snap);
                 else setStart(s.snap);
               }}
@@ -561,6 +867,12 @@ export default function App() {
                 <option key={s.id} value={s.id}>{s.label}</option>
               ))}
             </select>
+          </div>
+          <div className="field device-location-control">
+            <button className="btn secondary" disabled={busy || graphMode !== "nagpur"} onClick={() => { void useDeviceLocationAsStart(); }}>
+              <LocateFixed size={14} /> Use my location as start
+            </button>
+            <p className="hint" aria-live="polite">{locationStatus}</p>
           </div>
 
           <div className="field">
@@ -624,10 +936,20 @@ export default function App() {
             />
           </div>
 
-          <h2>Map click mode</h2>
+          <h2>Choose locations on map</h2>
+          <p className="hint">Select a start or destination, then click the map. Select either again any time to change it.</p>
           <div className="row">
             {(["start", "goal", "block", "congestion"] as PickMode[]).map((m) => (
-              <button key={m} className={`tab ${pickMode === m ? "active" : ""}`} onClick={() => setPickMode(m)}>{m}</button>
+              <button
+                key={m}
+                className={`tab ${pickMode === m ? "active" : ""}`}
+                onClick={() => {
+                  setPickMode(m);
+                  if (m === "start") manualEndpointChoiceRef.current = true;
+                }}
+              >
+                {m === "start" ? "Set start" : m === "goal" ? "Set destination" : m}
+              </button>
             ))}
           </div>
           <div className="field">
@@ -658,6 +980,8 @@ export default function App() {
           onMapClick={onMapClick}
           onRoadClick={onRoadClick}
           ambulancePos={ambulancePos}
+          deviceLocation={deviceLocation}
+          locationFocus={graphMode === "nagpur" ? locationFocus : null}
         />
 
         <aside className="panel right">
@@ -729,8 +1053,8 @@ export default function App() {
                     <th>Algorithm</th>
                     <th>Found</th>
                     <th>Route cost</th>
-                    <th>Distance</th>
-                    <th>Est. time</th>
+                    <th>{sim ? "Remaining distance" : "Distance"}</th>
+                    <th>{sim ? "Est. time left" : "Est. time"}</th>
                     <th>Explored nodes</th>
                     <th>CPU time (s)</th>
                     <th>Path</th>
@@ -738,8 +1062,12 @@ export default function App() {
                 </thead>
                 <tbody>
                   {(compare?.rows || (route ? [route] : [])).map((r) => {
-                    const distance = r.distance_m ?? (r.objective === "distance" ? r.cost : null);
-                    const estimatedTime = r.time_s ?? (r.objective === "time" ? r.cost : null);
+                    const distance = sim
+                      ? sim.remaining_distance_m
+                      : r.distance_m ?? (r.objective === "distance" ? r.cost : null);
+                    const estimatedTime = sim
+                      ? sim.remaining_time_s
+                      : r.time_s ?? (r.objective === "time" ? r.cost : null);
                     const path = r.path || [];
                     return (
                       <tr key={r.algorithm + String(r.execution_time_s)}>
@@ -747,7 +1075,7 @@ export default function App() {
                         <td>{r.found ? "yes" : "no"}</td>
                         <td>{fmt(r.cost, 2)} {r.cost_unit || ""}</td>
                         <td>{fmt(distance, 1, "m")}</td>
-                        <td>{fmt(estimatedTime, 1, "s")}</td>
+                        <td>{fmtTime(estimatedTime)}</td>
                         <td>{r.explored}</td>
                         <td>{fmt(r.execution_time_s, 4)}</td>
                         <td title={path.join(" → ")}>
@@ -900,6 +1228,20 @@ export default function App() {
           </div>
         )}
       </section>
+      {notification && (
+        <div className={`route-notification ${notification.level}`} role="status" aria-live="polite" key={notification.id}>
+          {notification.level === "safe"
+            ? <CheckCircle2 size={21} aria-hidden="true" />
+            : <AlertTriangle size={21} aria-hidden="true" />}
+          <div>
+            <strong>{notification.title}</strong>
+            <p>{notification.message}</p>
+          </div>
+          <button type="button" aria-label="Dismiss notification" onClick={dismissNotification}>
+            <X size={17} />
+          </button>
+        </div>
+      )}
       <AmbuAssist context={assistantContext} />
     </div>
   );

@@ -8,6 +8,10 @@ export interface LatLon {
   lon: number;
 }
 
+export interface DeviceLocation extends LatLon {
+  accuracy_m: number;
+}
+
 export interface Snap {
   node_id: string;
   lat: number;

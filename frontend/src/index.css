@@ -87,6 +87,9 @@ button { cursor: pointer; }
   background: #fff;
 }
 .row { display: flex; gap: 8px; flex-wrap: wrap; }
+.device-location-control { margin-top: 10px; }
+.device-location-control .btn { align-self: flex-start; display: inline-flex; align-items: center; gap: 6px; }
+.device-location-control .hint { margin-bottom: 0; overflow-wrap: anywhere; }
 .btn {
   border: 0;
   border-radius: 6px;
@@ -110,6 +113,43 @@ button { cursor: pointer; }
 }
 .ok { background: #e8f6ee; color: #146037; padding: 8px 10px; border-radius: 6px; font-size: 0.78rem; }
 
+.route-notification {
+  position: fixed;
+  z-index: 1700;
+  top: 78px;
+  right: 20px;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: min(390px, calc(100vw - 32px));
+  padding: 13px 12px;
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--ok);
+  border-radius: 9px;
+  background: #fff;
+  box-shadow: 0 10px 30px rgba(11, 31, 58, 0.2);
+  color: var(--ink);
+}
+.route-notification.safe { border-left-color: var(--ok); }
+.route-notification.warning { border-left-color: var(--warn); }
+.route-notification.danger { border-left-color: var(--red); }
+.route-notification.safe > svg { color: var(--ok); }
+.route-notification.warning > svg { color: var(--warn); }
+.route-notification.danger > svg { color: var(--red); }
+.route-notification > div { flex: 1; min-width: 0; }
+.route-notification strong { display: block; margin-bottom: 3px; color: var(--navy); font-size: 0.82rem; }
+.route-notification p { margin: 0; color: var(--muted); font-size: 0.75rem; line-height: 1.45; }
+.route-notification button {
+  display: grid;
+  place-items: center;
+  padding: 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+}
+.route-notification button:hover { background: #eef2f7; color: var(--navy); }
+
 .map-wrap { position: relative; min-height: 0; }
 .map-wrap .leaflet-container { height: 100%; width: 100%; background: #d9e4f0; }
 .map-legend {
@@ -126,6 +166,7 @@ button { cursor: pointer; }
 }
 .map-legend span { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
 .swatch { width: 16px; height: 4px; border-radius: 2px; display: inline-block; }
+.location-swatch { width: 11px; height: 11px; margin: 0 2px; border: 2px solid #fff; border-radius: 50%; background: #1676d2; box-shadow: 0 0 0 1px #1676d2; display: inline-block; }
 
 .kv { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; font-size: 0.78rem; margin-bottom: 10px; }
 .kv dt { color: var(--muted); }
@@ -366,6 +407,7 @@ th { color: var(--muted); font-weight: 600; }
   .charts-heading { flex-direction: column; }
   .chart-card { height: 260px; }
   .chart-plot { height: 210px; }
+  .route-notification { top: 12px; right: 8px; }
   .ambuassist-launcher { right: 14px; bottom: 14px; }
   .ambuassist-panel {
     right: 8px;

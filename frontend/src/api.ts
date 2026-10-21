@@ -39,8 +39,8 @@ export const api = {
   scenarios: () => http<{ scenarios: { id: string; title: string; description: string }[] }>("/api/scenarios"),
   snap: (body: { lat: number; lon: number; graph_mode: GraphMode }) =>
     http<Snap>("/api/map/snap", { method: "POST", body: JSON.stringify(body) }),
-  loadMap: (body: { dist_m: number; force_download?: boolean; use_cache_only?: boolean }) =>
-    http<MapInfo & { ok: boolean; stats: { node_count: number; edge_count: number } }>("/api/map/load", {
+  loadMap: (body: { dist_m: number; lat?: number; lon?: number; force_download?: boolean; use_cache_only?: boolean }) =>
+    http<MapInfo & { ok: boolean; stats: { node_count: number; edge_count: number; meta?: Record<string, unknown> } }>("/api/map/load", {
       method: "POST",
       body: JSON.stringify(body),
     }),

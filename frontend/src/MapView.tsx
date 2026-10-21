@@ -1,7 +1,7 @@
-import { useMemo } from "react";
-import { GeoJSON, MapContainer, Marker, Polyline, TileLayer, CircleMarker, useMapEvents } from "react-leaflet";
+import { useEffect, useMemo } from "react";
+import { Circle, CircleMarker, GeoJSON, MapContainer, Marker, Polyline, TileLayer, useMap, useMapEvents } from "react-leaflet";
 import L from "leaflet";
-import type { PickMode, SearchEvent, SimulationSnapshot, Snap } from "./types";
+import type { DeviceLocation, PickMode, SearchEvent, SimulationSnapshot, Snap } from "./types";
 
 type RoadCollection = { type: "FeatureCollection"; features: Array<{ type: string; properties?: Record<string, unknown>; geometry?: unknown }> };
 
@@ -41,6 +41,14 @@ function ClickCatcher({
   return null;
 }
 
+function LocationFocus({ position }: { position: [number, number] | null }) {
+  const map = useMap();
+  useEffect(() => {
+    if (position) map.flyTo(position, Math.max(map.getZoom(), 15));
+  }, [map, position]);
+  return null;
+}
+
 function toLatLngs(geom?: number[][]): [number, number][] {
   if (!geom) return [];
   return geom.map(([lat, lon]) => [lat, lon]);
@@ -62,6 +70,8 @@ export function MapView({
   onMapClick,
   onRoadClick,
   ambulancePos,
+  deviceLocation,
+  locationFocus,
 }: {
   center: [number, number];
   zoom?: number;
@@ -78,6 +88,8 @@ export function MapView({
   onMapClick: (lat: number, lon: number) => void;
   onRoadClick: (edgeId: string, name: string) => void;
   ambulancePos?: [number, number] | null;
+  deviceLocation?: DeviceLocation | null;
+  locationFocus?: [number, number] | null;
 }) {
   const blocked = new Set(sim?.blocked_edges || []);
   const congestion = sim?.congestion || {};
@@ -141,6 +153,7 @@ export function MapView({
         preferCanvas
         style={{ height: "100%", width: "100%" }}
       >
+        <LocationFocus position={locationFocus || null} />
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -182,8 +195,25 @@ export function MapView({
         {start && <Marker position={[start.lat, start.lon]} icon={startIcon} />}
         {goal && <Marker position={[goal.lat, goal.lon]} icon={hospitalIcon} />}
         {amb && <Marker position={amb} icon={ambulanceIcon} />}
+        {deviceLocation && (
+          <>
+            <Circle
+              center={[deviceLocation.lat, deviceLocation.lon]}
+              radius={deviceLocation.accuracy_m}
+              interactive={false}
+              pathOptions={{ color: "#1676d2", fillColor: "#58a6ff", fillOpacity: 0.12, weight: 1 }}
+            />
+            <CircleMarker
+              center={[deviceLocation.lat, deviceLocation.lon]}
+              radius={7}
+              interactive={false}
+              pathOptions={{ color: "#fff", fillColor: "#1676d2", fillOpacity: 1, weight: 3 }}
+            />
+          </>
+        )}
       </MapContainer>
       <div className="map-legend">
+        <span><i className="location-swatch" /> Device location (GPS)</span>
         <span><i className="swatch" style={{ background: "#8aa0b8" }} /> OSM roads (cached extract)</span>
         <span><i className="swatch" style={{ background: "#1a56a8" }} /> Current planned route</span>
         <span><i className="swatch" style={{ background: "#6b7c93", height: 0, borderTop: "2px dashed #6b7c93" }} /> Previous remaining route</span>

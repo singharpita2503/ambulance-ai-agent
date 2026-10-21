@@ -18,7 +18,7 @@ class LatLon(BaseModel):
 class MapLoadRequest(BaseModel):
     lat: float = 21.1458
     lon: float = 79.0882
-    dist_m: float = Field(2200, ge=800, le=8000)
+    dist_m: float = Field(12000, ge=800, le=15000)
     force_download: bool = False
     use_cache_only: bool = False
 

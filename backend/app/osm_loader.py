@@ -1,11 +1,11 @@
 """
-Load a driveable OSM road graph for a small Nagpur bounding box.
+Load a driveable OSM road graph for a Nagpur bounding box.
 
 Primary path: OSMnx (when installed and a download succeeds).
 Fallback path: Overpass API, parsed into RoadGraph without NetworkX pathfinding.
 
 Downloaded graphs are cached as JSON under backend/data/ so the same bbox
-is not re-fetched. This respects OSM usage: small area, reuse cache.
+is not re-fetched. Reuse cached extracts instead of repeatedly downloading.
 """
 
 from __future__ import annotations
@@ -25,9 +25,9 @@ from .graph import Edge, Node, RoadGraph, haversine_m, speed_for_highway
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Nagpur city centre (public landmark region). Small study area ~4 km across.
+# Nagpur city centre. A 12 km radius covers the urban area around the centre.
 NAGPUR_CENTER = {"lat": 21.1458, "lon": 79.0882, "label": "Nagpur centre"}
-DEFAULT_DIST_M = 2200
+DEFAULT_DIST_M = 12000
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -50,6 +50,15 @@ def bbox_from_point(lat: float, lon: float, dist_m: float) -> dict[str, float]:
 def cache_path(bbox: dict[str, float]) -> Path:
     key = "{south:.4f}_{west:.4f}_{north:.4f}_{east:.4f}".format(**bbox)
     return DATA_DIR / f"nagpur_{key}.json"
+
+
+def _bbox_covers(outer: dict[str, float], inner: dict[str, float]) -> bool:
+    return (
+        outer.get("north", -90) >= inner["north"]
+        and outer.get("south", 90) <= inner["south"]
+        and outer.get("east", -180) >= inner["east"]
+        and outer.get("west", 180) <= inner["west"]
+    )
 
 
 def latest_cache() -> Optional[Path]:
@@ -87,20 +96,23 @@ def load_map(
         cached = load_from_cache(path)
         if cached is not None:
             return cached
-        # Reuse any previous Nagpur extract if the exact bbox file is missing.
-        any_cache = load_from_cache()
-        if any_cache is not None and not force_download:
-            return any_cache
 
     errors: list[str] = []
     graph: Optional[RoadGraph] = None
-    # Prefer the official OSM map API for this small bbox; Overpass is often congested.
-    try:
-        graph = _load_osm_map_api(bbox)
-    except Exception as exc:  # noqa: BLE001
-        errors.append(f"OSM map API: {exc}")
+    if dist_m > 5000:
+        try:
+            graph = _load_osmnx(bbox, lat, lon, dist_m)
+        except Exception as exc:  # noqa: BLE001 — fallback is intentional
+            errors.append(f"OSMnx: {exc}")
 
-    if graph is None:
+    # The official OSM map API is suitable for compact extracts, not city-wide areas.
+    if graph is None and dist_m <= 5000:
+        try:
+            graph = _load_osm_map_api(bbox)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"OSM map API: {exc}")
+
+    if graph is None and dist_m <= 5000:
         try:
             graph = _load_osmnx(bbox, lat, lon, dist_m)
         except Exception as exc:  # noqa: BLE001 — fallback is intentional
@@ -113,8 +125,8 @@ def load_map(
             errors.append(f"Overpass: {exc}")
 
     if graph is None:
-        cached = load_from_cache()
-        if cached is not None:
+        cached = load_from_cache(path)
+        if cached is not None and _bbox_covers(cached.meta.get("bbox", {}), bbox):
             cached.meta["warning"] = "Download failed; loaded previously cached graph. " + " | ".join(errors)
             return cached
         raise RuntimeError(

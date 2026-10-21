@@ -102,9 +102,9 @@ No parameters are trained on data. Behaviour is defined by the search procedure,
 
 ## 7. OpenStreetMap data
 
-- Study area: configurable radius around Nagpur centre `(21.1458, 79.0882)`, default **2200 m** (about 4 km across).
-- Download via **OSMnx** when available, otherwise the **Overpass API**.
-- Cached as JSON under `backend/data/nagpur_*.json`. Reuse the cache; do not repeatedly download the same bbox.
+- Default road coverage: configurable **12 km radius** around Nagpur centre `(21.1458, 79.0882)`; the first city-wide download may take a few minutes.
+- City-wide extracts use **OSMnx** first, with the **Overpass API** as a fallback. Compact study areas can use the official OSM map API.
+- Cached as JSON under `backend/data/nagpur_*.json`. Reuse the cache; do not repeatedly download the same bbox. A smaller cached extract is not treated as a substitute for the requested city-wide coverage.
 - Tiles: `https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png` with attribution **© OpenStreetMap contributors**.
 - Comply with OSM tile and Overpass usage: keep the bbox small, cache results, do not hammer the servers.
 
@@ -181,6 +181,8 @@ npm run dev
 
 UI: http://127.0.0.1:5173  
 Vite proxies `/api` to the backend. On first use click **Load / download map** (internet) or **Cache only** if `backend/data` already has a JSON extract.
+
+Allow the browser's location permission to show the device GPS position on the map. The app loads the city-wide Nagpur road network as needed, then uses a nearby road as the trip start. You can also click **Use my location as start** to refresh it. To choose or change endpoints manually, select **Set start** or **Set destination**, then click the map. Browser location requires permission and is available on localhost or a secure HTTPS origin.
 
 ### Tests
 

@@ -26,7 +26,15 @@ from .models import (
     SimulationStartRequest,
     SnapRequest,
 )
-from .osm_loader import load_from_cache, load_map, sample_waypoints, NAGPUR_CENTER, DEFAULT_DIST_M
+from .osm_loader import (
+    DEFAULT_DIST_M,
+    NAGPUR_CENTER,
+    bbox_from_point,
+    cache_path,
+    load_from_cache,
+    load_map,
+    sample_waypoints,
+)
 from .scenarios import run_scenario, scenario_catalog
 from .simulation import (
     advance,
@@ -167,7 +175,7 @@ def map_info() -> dict[str, Any]:
     if g is not None:
         info["nagpur"] = g.stats()
         info["samples"] = sample_waypoints(g)
-        info["roads"] = g.road_geojson(max_features=10000)
+        info["roads"] = g.road_geojson(max_features=50000)
     return info
 
 
@@ -184,9 +192,12 @@ def map_snap(req: SnapRequest) -> dict[str, Any]:
 def map_load(req: MapLoadRequest) -> dict[str, Any]:
     try:
         if req.use_cache_only:
-            graph = load_from_cache()
+            bbox = bbox_from_point(req.lat, req.lon, req.dist_m)
+            graph = load_from_cache(cache_path(bbox))
             if graph is None:
-                raise RuntimeError("No cached graph on disk. Disable use_cache_only or download with internet.")
+                raise RuntimeError(
+                    "No cached graph exists for this map radius. Load / download the city-wide map first."
+                )
         else:
             graph = load_map(
                 dist_m=req.dist_m,
@@ -212,7 +223,7 @@ def map_load(req: MapLoadRequest) -> dict[str, Any]:
         "samples": sample_waypoints(graph),
         "center": graph.meta.get("center") or NAGPUR_CENTER,
         "bbox": graph.meta.get("bbox"),
-        "roads": graph.road_geojson(max_features=10000),
+        "roads": graph.road_geojson(max_features=50000),
         "attribution": graph.meta.get("attribution"),
         "traffic_note": graph.meta.get("traffic_note"),
     }
